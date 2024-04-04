@@ -94,3 +94,7 @@ interface IBlast {
             GasMode
         );
 }
+
+interface IBlastPoints {
+    function configurePointsOperator(address operator) external;
+}
