@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.18;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -15,7 +15,7 @@ contract GasTank is ReentrancyGuard, Ownable {
         IBlastPoints(0x2fc95838c71e76ec69ff817983BFf17c710F34E0);
     address public treasuror;
 
-    uint256 public MINIMUM_CONTRIBUTION_AMOUNT = 0.001 ether; // Minimum Amount to Stake
+    uint256 public MINIMUM_CONTRIBUTION_AMOUNT = 0.000001 ether; // Minimum Amount to Stake
 
     string private constant NEVER_CONTRIBUTED_ERROR =
         "This address has never contributed ETH to the protocol";
@@ -24,112 +24,249 @@ contract GasTank is ReentrancyGuard, Ownable {
 
     struct Staker {
         address addr; // The Address of the Staker
-        uint256 debt; // Native ETH amount that is used
-        uint256 reserve; // Native ETH amount that is available
+        uint256 shares;
+        uint256 debts;
         uint256 joined; // The time that the user joined the protocol
-        uint256 nonce; // Block recall unstake
         bool exists;
     }
+
+    uint256 public totalDebts;
+    uint256 public totalShares;
+    uint256 private base;
+    bool private initialRatioFlag;
 
     mapping(address => Staker) public stakers;
     address[] public stakerList;
 
     constructor(address _pointsOperator) ReentrancyGuard() Ownable() {
-        BLAST.configureAutomaticYield(); //contract balance will grow automatically
-        BLAST_POINTS.configurePointsOperator(_pointsOperator);
+        // BLAST.configureAutomaticYield();
+        // BLAST_POINTS.configurePointsOperator(_pointsOperator);
         treasuror = _pointsOperator;
+        base = 10 ** 18;
     }
 
     receive() external payable {}
     fallback() external payable {}
 
-    function Stake() external payable nonReentrant {
+    modifier isInitialRatioNotSet() {
+        require(!initialRatioFlag, "Initial Ratio has already been set");
+        _;
+    }
+
+    modifier isInitialRatioSet() {
+        require(initialRatioFlag, "Initial Ratio has not yet been set");
+        _;
+    }
+
+    function configureClaimableYield() external onlyOwner {
+        BLAST.configureClaimableYield();
+    }
+
+    function configureAutomaticYield() external onlyOwner {
+        BLAST.configureAutomaticYield();
+    }
+
+    function configureClaimableGas() external onlyOwner {
+        BLAST.configureClaimableGas();
+    }
+
+    function configureGovernor(address _governor) external onlyOwner {
+        BLAST.configureGovernor(_governor);
+    }
+
+    // claim yield
+    function claimYield(
+        address recipientOfYield,
+        uint256 amount
+    ) external onlyOwner {
+        BLAST.claimYield(address(this), recipientOfYield, amount);
+    }
+
+    function claimAllYield(address recipientOfYield) external onlyOwner {
+        BLAST.claimAllYield(address(this), recipientOfYield);
+    }
+
+    // claim gas
+    function claimAllGas(address recipientOfGas) external onlyOwner {
+        BLAST.claimAllGas(address(this), recipientOfGas);
+    }
+
+    function claimMaxGas(address recipientOfGas) external onlyOwner {
+        BLAST.claimMaxGas(address(this), recipientOfGas);
+    }
+
+    // read functions
+    function readClaimableYield() external view returns (uint256) {
+        return BLAST.readClaimableYield(address(this));
+    }
+
+    function readYieldConfiguration() external view returns (uint8) {
+        return BLAST.readYieldConfiguration(address(this));
+    }
+
+    function readGasParams()
+        external
+        view
+        returns (
+            uint256 etherSeconds,
+            uint256 etherBalance,
+            uint256 lastUpdated,
+            GasMode
+        )
+    {
+        return BLAST.readGasParams(address(this));
+    }
+
+    // Staking
+    function readContractAvailable() public view returns (uint256) {
+        uint256 contractBalance = address(this).balance;
+        return contractBalance;
+    }
+
+    function setInitialRatio(uint256 stakeAmount) public payable {
+        require(totalShares == 0, "Stakes and shares are non-zero");
+        require(
+            stakeAmount >= MINIMUM_CONTRIBUTION_AMOUNT,
+            MINIMUM_CONTRIBUTION_ERROR
+        );
+
+        // Create new user & Add user to Stakers
+        stakers[msg.sender] = Staker({
+            addr: msg.sender,
+            exists: true,
+            joined: block.timestamp,
+            debts: 0,
+            shares: base
+        });
+        stakerList.push(msg.sender);
+
+        totalShares = base;
+        initialRatioFlag = true;
+
+        payable(address(this)).transfer(stakeAmount);
+    }
+
+    function caclContractShare(
+        uint256 stakeAmount
+    ) public view returns (uint256) {
+        uint256 shares = (stakeAmount * totalShares) / address(this).balance;
+        return shares;
+    }
+
+    function caclContractBalance() public view returns (uint256) {
+        return address(this).balance;
+    }
+
+    function depositBonus() external payable {
+        payable(address(this)).transfer(msg.value);
+    }
+
+    function stake() external payable nonReentrant {
         require(
             msg.value >= MINIMUM_CONTRIBUTION_AMOUNT,
             MINIMUM_CONTRIBUTION_ERROR
         );
-        uint256 eth = msg.value;
+        if (totalShares == 0) {
+            return setInitialRatio(msg.value);
+        }
 
-        if (StakerExists(msg.sender)) {
-            stakers[msg.sender].reserve = stakers[msg.sender].reserve + eth;
+        uint256 stkAmount = msg.value;
+        uint256 shares = (stkAmount * totalShares) /
+            (address(this).balance - msg.value);
+
+        if (stakerExists(msg.sender)) {
+            stakers[msg.sender].shares += shares;
         } else {
             // Create new user
-            Staker memory user;
-            user.addr = msg.sender;
-            user.reserve = eth;
-            user.debt = 0;
-            user.exists = true;
-            user.joined = block.timestamp;
-            user.nonce = 0;
-            // Add user to Stakers
-            stakers[msg.sender] = user;
+            stakers[msg.sender] = Staker({
+                addr: msg.sender,
+                exists: true,
+                joined: block.timestamp,
+                debts: 0,
+                shares: shares
+            });
             stakerList.push(msg.sender);
         }
-        payable(owner()).transfer(eth);
+        totalShares += shares;
+
+        payable(address(this)).transfer(stkAmount);
     }
 
-    function RemoveStake() external {
+    function calcUserRatio(
+        address owner,
+        uint256 amount
+    ) public view returns (uint256) {
+        uint256 shares = stakers[owner].shares;
+        uint256 currentRatio = (shares * base) / totalShares;
+        return (amount * currentRatio) / base;
+    }
+
+    function readAvailableByOwner(address owner) public view returns (uint256) {
+        uint256 stakeholderShares = stakers[owner].shares;
+        uint256 contractBalance = address(this).balance;
+        return (stakeholderShares * contractBalance) / totalShares;
+    }
+
+    function unstake(uint256 outAmount) public nonReentrant {
         address user = msg.sender;
-        if (!StakerExists(user)) {
-            revert(NEVER_CONTRIBUTED_ERROR);
-        }
-        uint256 uns = stakers[user].reserve;
-        if (uns == 0) {
-            revert("This user has nothing to withdraw from the protocol");
-        }
+        require(stakerExists(user), NEVER_CONTRIBUTED_ERROR);
 
-        // Remove Stake
-        stakers[user].reserve = 0;
-        stakers[user].nonce = stakers[user].nonce + 1;
-        payable(user).transfer(uns);
+        uint256 avaiable = readAvailableByOwner(user);
+        uint256 contractAvailable = readContractAvailable();
+        uint256 sharesToWithdraw = (outAmount * totalShares) /
+            contractAvailable;
+
+        require(avaiable >= outAmount, "Not enough ETH to withdraw");
+
+        stakers[msg.sender].debts += outAmount;
+        stakers[msg.sender].shares -= sharesToWithdraw;
+
+        totalShares -= sharesToWithdraw;
+
+        address payable recipient = payable(msg.sender);
+        recipient.transfer(outAmount);
     }
 
-    function RemoveStake() external {
-        address user = msg.sender;
-        if (!StakerExists(user)) {
-            revert(NEVER_CONTRIBUTED_ERROR);
-        }
-        uint256 uns = stakers[user].reserve;
-        if (uns == 0) {
-            revert("This user has nothing to withdraw from the protocol");
-        }
+    function sponsorTx(
+        address owner,
+        uint256 sponsorAmount
+    ) external onlyOwner {
+        require(stakerExists(owner), NEVER_CONTRIBUTED_ERROR);
 
-        // Remove Stake
-        stakers[user].reserve = 0;
-        stakers[user].nonce = stakers[user].nonce + 1;
-        payable(user).transfer(uns);
+        uint256 avaiable = readAvailableByOwner(owner);
+        uint256 contractAvailable = readContractAvailable();
+        uint256 sharesToWithdraw = (sponsorAmount * totalShares) /
+            contractAvailable;
+
+        require(avaiable >= sponsorAmount, "Not enough ETH to withdraw");
+
+        stakers[owner].debts += sponsorAmount;
+        stakers[owner].shares -= sharesToWithdraw;
+
+        totalShares -= sharesToWithdraw;
+        totalDebts = totalDebts + sponsorAmount;
+
+        address payable recipient = payable(msg.sender);
+        recipient.transfer(sponsorAmount);
     }
-
     /* 
 
       CONTRIBUTER GETTERS
 
     */
 
-    function StakerExists(address a) public view returns (bool) {
+    function stakerExists(address a) public view returns (bool) {
         return stakers[a].exists;
     }
 
-    function StakerCount() public view returns (uint256) {
+    function stakerCount() public view returns (uint256) {
         return stakerList.length;
     }
 
-    function GetStakeJoinDate(address a) public view returns (uint256) {
-        if (!StakerExists(a)) {
+    function getStakeJoinDate(address a) public view returns (uint256) {
+        if (!stakerExists(a)) {
             revert(NEVER_CONTRIBUTED_ERROR);
         }
         return stakers[a].joined;
-    }
-
-    function GetStakingAmount(address a) public view returns (uint256) {
-        if (!StakerExists(a)) {
-            revert(NEVER_CONTRIBUTED_ERROR);
-        }
-        return stakers[a].reserve;
-    }
-
-    function GetAllYield() public view returns (uint256) {
-        uint256 total_reward = BLAST.readClaimableYield(address(this));
-        return total_reward;
     }
 }
