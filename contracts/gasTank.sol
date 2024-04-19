@@ -33,30 +33,19 @@ contract GasTank is ReentrancyGuard, Ownable {
     uint256 public totalDebts;
     uint256 public totalShares;
     uint256 private base;
-    bool private initialRatioFlag;
 
     mapping(address => Staker) public stakers;
     address[] public stakerList;
 
     constructor(address _pointsOperator) ReentrancyGuard() Ownable() {
-        // BLAST.configureAutomaticYield();
-        // BLAST_POINTS.configurePointsOperator(_pointsOperator);
+        BLAST.configureAutomaticYield();
+        BLAST_POINTS.configurePointsOperator(_pointsOperator);
         treasuror = _pointsOperator;
         base = 10 ** 18;
     }
 
     receive() external payable {}
     fallback() external payable {}
-
-    modifier isInitialRatioNotSet() {
-        require(!initialRatioFlag, "Initial Ratio has already been set");
-        _;
-    }
-
-    modifier isInitialRatioSet() {
-        require(initialRatioFlag, "Initial Ratio has not yet been set");
-        _;
-    }
 
     function configureClaimableYield() external onlyOwner {
         BLAST.configureClaimableYield();
@@ -141,7 +130,6 @@ contract GasTank is ReentrancyGuard, Ownable {
         stakerList.push(msg.sender);
 
         totalShares = base;
-        initialRatioFlag = true;
 
         payable(address(this)).transfer(stakeAmount);
     }
@@ -207,16 +195,20 @@ contract GasTank is ReentrancyGuard, Ownable {
         return (stakeholderShares * contractBalance) / totalShares;
     }
 
-    function unstake(uint256 outAmount) public nonReentrant {
+    function unstake(uint256 sharesToWithdraw) public nonReentrant {
         address user = msg.sender;
         require(stakerExists(user), NEVER_CONTRIBUTED_ERROR);
 
-        uint256 avaiable = readAvailableByOwner(user);
+        uint256 avaiableShares = getStakeShares(user);
         uint256 contractAvailable = readContractAvailable();
-        uint256 sharesToWithdraw = (outAmount * totalShares) /
-            contractAvailable;
 
-        require(avaiable >= outAmount, "Not enough ETH to withdraw");
+        require(
+            avaiableShares >= sharesToWithdraw,
+            "Not enough ETH to withdraw"
+        );
+
+        uint256 outAmount = (sharesToWithdraw * contractAvailable) /
+            totalShares;
 
         stakers[msg.sender].debts += outAmount;
         stakers[msg.sender].shares -= sharesToWithdraw;
@@ -268,5 +260,12 @@ contract GasTank is ReentrancyGuard, Ownable {
             revert(NEVER_CONTRIBUTED_ERROR);
         }
         return stakers[a].joined;
+    }
+
+    function getStakeShares(address a) public view returns (uint256) {
+        if (!stakerExists(a)) {
+            revert(NEVER_CONTRIBUTED_ERROR);
+        }
+        return stakers[a].shares;
     }
 }
